@@ -59,6 +59,11 @@ impl EventKindExt for EventKind {
             Alloc { ptr, .. } => ptr,
             AddrOfLocal(lhs, _, _) => lhs,
             AddrOfConst(ptr, _) => ptr,
+            // Corner case: Offset(..) events with a base pointer of zero are special
+            // because the result might be an actual pointer, e.g., c2rust will
+            // emit a pointer increment `a += b` as `a = a.offset(b)` which we need
+            // to ignore here if `a == 0` which is equivalent to `a = b`.
+            Offset(0, _, ptr) => ptr,
             Offset(ptr, _, _) => ptr,
             Done | BeginFuncBody => return None,
         })
