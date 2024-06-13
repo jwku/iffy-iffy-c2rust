@@ -111,7 +111,7 @@ fn collect_children(g: &Graph) -> HashMap<NodeId, Vec<(NodeId, Vec<Field>)>> {
         .rev()
         .filter_map(|(child, child_node)| Some((child_node.source?, child, child_node)))
     {
-        if let NodeKind::Field(f) = child_node.kind {
+        if let NodeKind::Project(f) = child_node.kind {
             let my_children =
                 children
                     .remove(&child)

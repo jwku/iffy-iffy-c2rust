@@ -8,7 +8,7 @@ use indexmap::IndexSet;
 use log::{debug, trace};
 use rustc_ast::Mutability;
 use rustc_index::vec::Idx;
-use rustc_middle::mir::visit::{MutVisitor, MutatingUseContext, PlaceContext, Visitor};
+use rustc_middle::mir::visit::{MutVisitor, MutatingUseContext, NonMutatingUseContext, PlaceContext, Visitor};
 use rustc_middle::mir::{
     BasicBlock, BasicBlockData, Body, BorrowKind, ClearCrossCrate, HasLocalDecls, Local, LocalDecl,
     Location, Operand, Place, PlaceElem, ProjectionElem, Rvalue, Safety, SourceInfo, SourceScope,
@@ -24,7 +24,7 @@ use std::sync::Mutex;
 
 use crate::arg::{ArgKind, InstrumentationArg};
 use crate::hooks::Hooks;
-use crate::mir_utils::{has_outer_deref, remove_outer_deref, strip_all_deref};
+use crate::mir_utils::{has_outer_deref, remove_outer_deref};
 use crate::point::InstrumentationApplier;
 use crate::point::{cast_ptr_to_usize, InstrumentationPriority};
 use crate::point::{
@@ -343,31 +343,98 @@ impl<'tcx> Visitor<'tcx> for CollectInstrumentationPoints<'_, 'tcx> {
     fn visit_place(&mut self, place: &Place<'tcx>, context: PlaceContext, location: Location) {
         self.super_place(place, context, location);
 
-        let field_fn = self.hooks().find("ptr_field");
+        if !place.is_indirect() {
+            return;
+        }
+        if !context.is_use() {
+            return;
+        }
 
-        let base_ty = self.local_decls()[place.local].ty;
+        let copy_fn = self.hooks().find("ptr_copy");
+        let project_fn = self.hooks().find("ptr_project");
+        let load_fn = self.hooks().find("ptr_load");
+        let load_value_fn = self.hooks().find("load_value");
+        let store_fn = self.hooks().find("ptr_store");
 
-        // Instrument field projections on raw-ptr places
-        if is_region_or_unsafe_ptr(base_ty) && context.is_use() {
-            for (base, elem) in place.iter_projections() {
-                if let PlaceElem::Field(field, _) = elem {
-                    let proj_dest = || {
-                        // Only the last field projection gets a destination
-                        self.assignment()
-                            .as_ref()
-                            .map(|(dest, _)| dest)
-                            .copied()
-                            .filter(|_| base.projection.len() == place.projection.len() - 1)
-                    };
-                    self.loc(location, location, field_fn)
-                        .arg_var(place.local)
-                        .arg_index_of(field)
-                        .source(place)
-                        .dest_from(proj_dest)
-                        .add_to(self);
+        // Instrument nested projections and derefs
+        let mut proj_iter = place.iter_projections().peekable();
+
+        // Skip over the initial projections of the local since we do
+        // not want to take its address; we only care about the ones
+        // past the first dereference since at that point we have an
+        // actual pointer.
+        while let Some((_, elem)) = proj_iter.peek() {
+            if matches!(elem, PlaceElem::Deref) {
+                break;
+            }
+            let _ = proj_iter.next();
+        }
+
+        while let Some((deref1_base, PlaceElem::Deref)) = proj_iter.next() {
+            // Find the next Deref or end of projections
+            let (deref2_base, have_deref2) = loop {
+                match proj_iter.peek() {
+                    Some((base, PlaceElem::Deref)) => break (base.clone(), true),
+                    // Reached the end, we can use the full place
+                    None => break (place.as_ref(), false),
+                    _ => {
+                        let _ = proj_iter.next();
+                    }
                 }
+            };
+
+            // We have some other elements between the two projections
+            if deref2_base.projection.len() - deref1_base.projection.len() > 1 {
+                self.loc(location, location, project_fn)
+                    .arg_var(deref1_base)
+                    .arg_addr_of(deref2_base.clone())
+                    .add_to(self);
+            }
+
+            use PlaceContext::*;
+            if let Some(ptr_fn) = match context {
+                // We are just loading the address for the next dereference
+                _ if have_deref2 => Some(load_fn),
+
+                NonMutatingUse(NonMutatingUseContext::Inspect) |
+                NonMutatingUse(NonMutatingUseContext::Copy) |
+                NonMutatingUse(NonMutatingUseContext::Move) => Some(load_fn),
+
+                MutatingUse(MutatingUseContext::Store) |
+                MutatingUse(MutatingUseContext::Call) |
+                MutatingUse(MutatingUseContext::AsmOutput) => Some(store_fn),
+
+                NonMutatingUse(NonMutatingUseContext::ShallowBorrow) |
+                NonMutatingUse(NonMutatingUseContext::SharedBorrow) |
+                NonMutatingUse(NonMutatingUseContext::UniqueBorrow) |
+                NonMutatingUse(NonMutatingUseContext::AddressOf) |
+                MutatingUse(MutatingUseContext::Borrow) |
+                MutatingUse(MutatingUseContext::AddressOf) => Some(copy_fn),
+
+                NonMutatingUse(NonMutatingUseContext::Projection) |
+                MutatingUse(MutatingUseContext::SetDiscriminant) |
+                MutatingUse(MutatingUseContext::Deinit) |
+                MutatingUse(MutatingUseContext::Yield) |
+                MutatingUse(MutatingUseContext::Drop) |
+                MutatingUse(MutatingUseContext::Projection) |
+                MutatingUse(MutatingUseContext::Retag) |
+                NonUse(_) => None
+            } {
+                self.loc(location, location, ptr_fn)
+                    .arg_addr_of(deref2_base)
+                    .add_to(self);
+            }
+
+            if have_deref2 {
+                // Add an event for the pointer of the second dereference
+                self.loc(location, location, load_value_fn)
+                    .arg_var(deref2_base.clone())
+                    .add_to(self);
             }
         }
+        // If this algorithm is correct,
+        // we should have consumed the entire iterator
+        assert!(proj_iter.peek().is_none());
     }
 
     fn visit_assign(&mut self, dest: &Place<'tcx>, value: &Rvalue<'tcx>, location: Location) {
@@ -377,9 +444,7 @@ impl<'tcx> Visitor<'tcx> for CollectInstrumentationPoints<'_, 'tcx> {
         let ptr_to_int_fn = self.hooks().find("ptr_to_int");
         let load_value_fn = self.hooks().find("load_value");
         let store_value_fn = self.hooks().find("store_value");
-        let store_fn = self.hooks().find("ptr_store");
         let store_addr_taken_fn = self.hooks().find("ptr_store_addr_taken");
-        let load_fn = self.hooks().find("ptr_load");
 
         let dest = *dest;
         self.with_assignment((dest, value.clone()), |this| {
@@ -391,7 +456,6 @@ impl<'tcx> Visitor<'tcx> for CollectInstrumentationPoints<'_, 'tcx> {
 
         let op_ty = |op: &Operand<'tcx>| op.ty(&locals, ctx);
         let place_ty = |p: &Place<'tcx>| p.ty(&locals, ctx).ty;
-        let local_ty = |p: &Place| place_ty(&p.local.into());
         let value_ty = value.ty(self, self.tcx());
 
         self.visit_place(
@@ -427,33 +491,8 @@ impl<'tcx> Visitor<'tcx> for CollectInstrumentationPoints<'_, 'tcx> {
             _ => (),
         }
 
-        let mut add_load_instr = |p: &Place<'tcx>| {
-            self.loc(location, location, load_fn)
-                .arg_var(p.local)
-                .source(&remove_outer_deref(*p, ctx))
-                .add_to(self);
-        };
-
-        // add instrumentation for load-from-address operations
-        match value {
-            Rvalue::Use(Operand::Copy(p) | Operand::Move(p))
-                if p.is_indirect() && is_region_or_unsafe_ptr(local_ty(p)) =>
-            {
-                add_load_instr(p)
-            }
-            _ => (),
-        }
-
         match value {
             _ if dest.is_indirect() => {
-                // Strip all derefs to set base_dest to the pointer that is deref'd
-                let base_dest = strip_all_deref(&dest, self.tcx());
-
-                self.loc(location, location, store_fn)
-                    .arg_var(base_dest)
-                    .source(&remove_outer_deref(dest, self.tcx()))
-                    .add_to(self);
-
                 if is_region_or_unsafe_ptr(value_ty) {
                     self.loc(location, location.successor_within_block(), store_value_fn)
                         .arg_var(dest)

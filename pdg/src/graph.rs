@@ -27,7 +27,7 @@ pub enum NodeKind {
     /// Used for operations like `_2 = &(*_1).0`.
     /// Nested field accesses like `_4 = &(*_1).x.y.z`
     /// are broken into multiple [`Node`]s, each covering one level.
-    Field(#[serde(with = "crate::util::serde::FieldDef")] Field),
+    Project(#[serde(with = "crate::util::serde::FieldDef")] Field),
 
     /// Pointer arithmetic.
     ///
@@ -121,7 +121,7 @@ impl Display for NodeKind {
         use NodeKind::*;
         match self {
             Copy => write!(f, "copy"),
-            Field(field) => write!(f, "field.{}", field.as_usize()),
+            Project(field) => write!(f, "project.{}", project.as_usize()),
             Offset(offset) => write!(f, "offset[{offset}]"),
             AddrOfLocal(local) => write!(f, "&{local:?}"),
             _AddrOfStatic(static_) => write!(f, "&'static {static_:?}"),
