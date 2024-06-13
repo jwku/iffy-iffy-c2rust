@@ -1,5 +1,4 @@
 use crate::graph::{Graph, Graphs, Node, NodeId, NodeKind};
-use rustc_middle::mir::Field;
 use serde::{Deserialize, Serialize};
 use std::cmp::{max, min};
 use std::collections::{HashMap, HashSet};
@@ -7,6 +6,9 @@ use std::fmt::{self, Debug, Display, Formatter};
 
 /// Force an import of [`Node`] just for docs.
 const _: Option<Node> = None;
+
+/// The identity of a field of a structure is its offset.
+type Field = usize;
 
 /// Information generated from the PDG proper that is queried by static analysis.
 ///

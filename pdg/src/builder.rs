@@ -70,7 +70,7 @@ impl EventKindExt for EventKind {
             Realloc { .. } => NodeKind::Alloc(1),
             Free { .. } => NodeKind::Free,
             CopyPtr(..) | CopyRef => NodeKind::Copy,
-            Project(_, field) => NodeKind::Project(field.into()),
+            Project(base_ptr, new_ptr) => NodeKind::Project(new_ptr - base_ptr),
             LoadAddr(..) => NodeKind::LoadAddr,
             StoreAddr(..) => NodeKind::StoreAddr,
             StoreAddrTaken(..) => NodeKind::StoreAddr,
@@ -122,6 +122,7 @@ fn update_provenance(
         Realloc { new_ptr, .. } => {
             provenances.insert(new_ptr, mapping);
         }
+        Project(_, new_ptr) |
         Offset(_, _, new_ptr) => {
             provenances.insert(new_ptr, mapping);
         }
@@ -151,7 +152,7 @@ pub fn add_node(
 
     let node_kind = event.kind.to_node_kind(func.id, address_taken)?;
     let this_id = func.id;
-    let (src_fn, dest_fn) = match event_metadata.transfer_kind {
+    let (_src_fn, dest_fn) = match event_metadata.transfer_kind {
         TransferKind::None => (this_id, this_id),
         TransferKind::Arg(id) => (this_id, id),
         TransferKind::Ret(id) => (id, this_id),
@@ -163,48 +164,8 @@ pub fn add_node(
         statement_idx = 0;
     }
 
-    let provenance = event
-        .kind
-        .ptr(event_metadata)
-        .and_then(|ptr| provenances.get(&ptr).cloned());
-    let direct_source = provenance.and_then(|(gid, _last_nid_ref)| {
-        graphs.graphs[gid]
-            .nodes
-            .iter()
-            .rposition(|n| {
-                if let (Some(d), Some(s)) = (&n.dest, &event_metadata.source) {
-                    d == s
-                } else {
-                    false
-                }
-            })
-            .map(|nid| (gid, NodeId::from(nid)))
-    });
-
-    let source = direct_source.or_else(|| {
-        event_metadata.source.as_ref().and_then(|src| {
-            let latest_assignment = graphs.latest_assignment.get(&(src_fn, src.local)).cloned();
-            if !src.projection.is_empty() {
-                if let Some((gid, _)) = latest_assignment {
-                    if let Some((nid, n)) = graphs.graphs[gid].nodes.iter_enumerated().rev().next()
-                    {
-                        if let NodeKind::Project(..) = n.kind {
-                            return Some((gid, nid));
-                        }
-                    }
-                }
-            }
-
-            if !matches!(event.kind, EventKind::AddrOfLocal(..)) && src.projection.is_empty() {
-                latest_assignment
-            } else if let EventKind::Project(..) = event.kind {
-                latest_assignment
-            } else {
-                provenance
-            }
-        })
-    });
-
+    let ptr = event.kind.ptr(event_metadata);
+    let provenance = ptr.and_then(|ptr| provenances.get(&ptr).cloned());
     let function = Func {
         id: dest_fn,
         name: metadata.functions[&dest_fn].clone(),
@@ -215,7 +176,7 @@ pub fn add_node(
         block: basic_block_idx.into(),
         statement_idx,
         kind: node_kind,
-        source: source
+        source: provenance
             .and_then(|p| parent(&node_kind, p))
             .map(|(_, nid)| nid),
         dest: event_metadata.destination.clone(),
@@ -223,9 +184,7 @@ pub fn add_node(
         info: None,
     };
 
-    let graph_id = source
-        .or(direct_source)
-        .or(provenance)
+    let graph_id = provenance
         .and_then(|p| parent(&node_kind, p))
         .map(|(gid, _)| gid)
         .unwrap_or_else(|| graphs.graphs.push(Graph::new()));
@@ -237,26 +196,6 @@ pub fn add_node(
         event_metadata,
         (graph_id, node_id),
     );
-
-    if let Some(dest) = &event_metadata.destination {
-        let unique_place = (dest_fn, dest.local);
-        let last_setting = (graph_id, node_id);
-
-        if let Some(last @ (last_gid, last_nid)) =
-            graphs.latest_assignment.insert(unique_place, last_setting)
-        {
-            if !dest.projection.is_empty()
-                && graphs.graphs[last_gid].nodes[last_nid]
-                    .dest
-                    .as_ref()
-                    .unwrap()
-                    .projection
-                    .is_empty()
-            {
-                graphs.latest_assignment.insert(unique_place, last);
-            }
-        }
-    }
 
     Some(node_id)
 }
