@@ -62,6 +62,9 @@ pub enum EventKind {
     /// The pointer that appears as the address result of addr_of(Local)
     AddrOfLocal(Pointer, Local, u32),
 
+    /// The address of a constant value
+    AddrOfConst(Pointer, u32),
+
     /// Casting the pointer to an int
     ToInt(Pointer),
 
@@ -106,6 +109,7 @@ impl Debug for EventKind {
             StoreAddrTaken(ptr) => write!(f, "store(0x{:x})", ptr),
             CopyRef => write!(f, "copy_ref"),
             AddrOfLocal(ptr, _, size) => write!(f, "addr_of_local({}) = 0x{:x}", size, ptr),
+            AddrOfConst(ptr, size) => write!(f, "addr_of_const({}) = 0x{:x}", size, ptr),
             ToInt(ptr) => write!(f, "to_int(0x{:x})", ptr),
             FromInt(ptr) => write!(f, "from_int(0x{:x})", ptr),
             LoadValue(ptr) => write!(f, "load_value(0x{:x})", ptr),

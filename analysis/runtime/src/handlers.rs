@@ -145,6 +145,13 @@ pub fn addr_of_local(mir_loc: MirLocId, ptr: usize, local: u32, size: u32) {
     });
 }
 
+pub fn addr_of_const(mir_loc: MirLocId, ptr: usize, size: u32) {
+    RUNTIME.send_event(Event {
+        mir_loc,
+        kind: EventKind::AddrOfConst(ptr, size),
+    });
+}
+
 pub fn load_value(mir_loc: MirLocId, ptr: usize) {
     RUNTIME.send_event(Event {
         mir_loc,
