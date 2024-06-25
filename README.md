@@ -1,3 +1,9 @@
+To elaborate a bit on why C isn't a great compilation target, even for the stuff that can be dealt with "easily":
+
+One might think x = (a + b) as i32; in Rust could be x = a + b; in C. But of course C has a bunch of implicit promotion and UB signed overflow, so it's not. That might need to be, for example, x = (int32_t)(int16_t)((uint16_t)a + (uint16_t)b); to get the behaviour right.
+
+Whereas in LLVM it's add i16 then sext i16 to i32 -- a much more direct and obvious translation of the behaviour.
+
 # C2Rust
 
 [![GitHub Actions Status]][github] [![Azure Build Status]][azure] [![Latest Version]][crates.io] [![Rustc Version]](#)
